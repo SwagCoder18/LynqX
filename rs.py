@@ -1,32 +1,45 @@
 import asyncio
 import json
-import threading
-from flask import Flask
 
 # In-memory rooms registry
 ROOMS = {}
 
-# Flask app for health checks
-app = Flask(__name__)
-@app.route('/', methods=['GET'])
-def health():
-    return 'OK', 200
-
-def run_health():
-    # Run Flask in a separate thread
-    app.run(host='0.0.0.0', port=8000, threaded=True)
-
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    # Read first line: determine if HTTP or chat protocol
     data = await reader.readline()
     if not data:
         writer.close()
         return
-    req = json.loads(data.decode())
-    action = req.get('action')
-    room_id = req.get('room_id')
+    text = data.decode(errors='ignore')
+    # HTTP health check handling
+    if text.startswith('GET '):
+        parts = text.split(' ')
+        path = parts[1] if len(parts) > 1 else ''
+        if path == '/health':
+            response = (
+                'HTTP/1.1 200 OK\r\n'
+                'Content-Type: text/plain\r\n'
+                'Content-Length: 2\r\n'
+                'Connection: close\r\n'
+                '\r\n'
+                'OK'
+            )
+            writer.write(response.encode())
+            await writer.drain()
+        writer.close()
+        return
 
+    # Chat JSON protocol
+    try:
+        req = json.loads(text)
+        action = req.get('action')
+        room_id = req.get('room_id')
+    except Exception:
+        writer.close()
+        return
+
+    # Handle create/join
     if action == 'create':
-        # generate a new room ID
         room_id = ''.join(__import__('random').choices('0123456789', k=6))
         ROOMS[room_id] = [writer]
         writer.write(json.dumps({'status':'ok','room_id':room_id}).encode() + b"\n")
@@ -46,12 +59,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         writer.close()
         return
 
+    # Relay messages/files between peers
     try:
         while True:
             line = await reader.readline()
             if not line:
                 break
-            # Broadcast to all other peers
             for w in list(ROOMS.get(room_id, [])):
                 if w is not writer:
                     w.write(line)
@@ -69,21 +82,16 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 async def start_server(port: int):
     server = await asyncio.start_server(handle_client, host='0.0.0.0', port=port)
-    print(f"[*] Relay server listening on 0.0.0.0:{port}")
+    print(f"[*] Relay & health server listening on 0.0.0.0:{port}")
     async with server:
         await server.serve_forever()
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description='P2P Relay Server with Health Check')
-    parser.add_argument('-p', '--port', type=int, default=12345, help='Port for relay service')
+    parser = argparse.ArgumentParser(description='P2P Relay Server with Health on same port')
+    parser.add_argument('-p', '--port', type=int, default=12345, help='Port for both relay and health')
     args = parser.parse_args()
 
-    # Start health-check endpoint
-    threading.Thread(target=run_health, daemon=True).start()
-    print('[*] Health check available at http://0.0.0.0:8000/health')
-
-    # Start the relay server (asyncio)
     try:
         asyncio.run(start_server(args.port))
     except KeyboardInterrupt:
