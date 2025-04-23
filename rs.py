@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 
 # In-memory rooms registry
 ROOMS = {}
@@ -11,18 +12,20 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         writer.close()
         return
     text = data.decode(errors='ignore')
-    # HTTP health check handling
-    if text.startswith('GET '):
+
+    # HTTP health check handling (support '/' and '/health')
+    if text.startswith(('GET ', 'HEAD ')):
         parts = text.split(' ')
         path = parts[1] if len(parts) > 1 else ''
-        if path == '/health':
+        if path in ('/', '/health'):
+            body = 'OK'
             response = (
                 'HTTP/1.1 200 OK\r\n'
-                'Content-Type: text/plain\r\n'
-                'Content-Length: 2\r\n'
+                'Content-Type: text/plain; charset=utf-8\r\n'
+                f'Content-Length: {len(body)}\r\n'
                 'Connection: close\r\n'
                 '\r\n'
-                'OK'
+                f'{body}'
             )
             writer.write(response.encode())
             await writer.drain()
@@ -70,7 +73,6 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     w.write(line)
                     await w.drain()
     finally:
-        # Cleanup on disconnect
         participants = ROOMS.get(room_id, [])
         if writer in participants:
             participants.remove(writer)
@@ -87,12 +89,9 @@ async def start_server(port: int):
         await server.serve_forever()
 
 if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser(description='P2P Relay Server with Health on same port')
-    parser.add_argument('-p', '--port', type=int, default=12345, help='Port for both relay and health')
-    args = parser.parse_args()
-
+    # Use PORT env var if available (e.g. Render sets $PORT)
+    port = int(os.getenv('PORT', '12345'))
     try:
-        asyncio.run(start_server(args.port))
+        asyncio.run(start_server(port))
     except KeyboardInterrupt:
         print("\n[!] Server shutting down.")
