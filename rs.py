@@ -31,6 +31,12 @@ async def create_room():
     print(f"[Server] Created room: {rid}")
     return {"room_id": rid}
 
+@app.get("/rooms/{room_id}")
+async def room_exists(room_id: str):
+    if room_id not in ROOMS:
+        raise HTTPException(status_code=404, detail="Room not found")
+    return {"status": "ok", "room_id": room_id}
+
 @app.post("/rooms/{room_id}/send")
 async def send_message(room_id: str, message: Message):
     if room_id not in ROOMS:
