@@ -1,97 +1,83 @@
+# relay_server.py
+#!/usr/bin/env python3
+"""
+WebSocket-based P2P Relay & Health Server
+
+Usage:
+  # Run on Render or any HTTP-capable host (uses $PORT or defaults to 12345):
+  python3 relay_server.py
+
+Clients connect via WebSocket to ws://<host>:<port>/ws
+Health check on HTTP GET / or /health returns 200 OK.
+"""
 import asyncio
 import json
 import os
+import random
+from websockets import serve, WebSocketServerProtocol
+import websockets
 
-# In-memory rooms registry
+# room_id -> set of WebSocketServerProtocol
 ROOMS = {}
 
-async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    # Read first line: determine if HTTP or chat protocol
-    data = await reader.readline()
-    if not data:
-        writer.close()
-        return
-    text = data.decode(errors='ignore')
-
-    # HTTP health check handling (support '/' and '/health')
-    if text.startswith(('GET ', 'HEAD ')):
-        parts = text.split(' ')
-        path = parts[1] if len(parts) > 1 else ''
-        if path in ('/', '/health'):
-            body = 'OK'
-            response = (
-                'HTTP/1.1 200 OK\r\n'
-                'Content-Type: text/plain; charset=utf-8\r\n'
-                f'Content-Length: {len(body)}\r\n'
-                'Connection: close\r\n'
-                '\r\n'
-                f'{body}'
-            )
-            writer.write(response.encode())
-            await writer.drain()
-        writer.close()
-        return
-
-    # Chat JSON protocol
+async def handler(ws: WebSocketServerProtocol, path: str):
+    # Initial JSON handshake
     try:
-        req = json.loads(text)
+        init = await ws.recv()
+        req = json.loads(init)
         action = req.get('action')
         room_id = req.get('room_id')
     except Exception:
-        writer.close()
+        await ws.close()
         return
 
-    # Handle create/join
     if action == 'create':
-        room_id = ''.join(__import__('random').choices('0123456789', k=6))
-        ROOMS[room_id] = [writer]
-        writer.write(json.dumps({'status':'ok','room_id':room_id}).encode() + b"\n")
-        await writer.drain()
+        room_id = ''.join(random.choices('0123456789', k=6))
+        ROOMS[room_id] = {ws}
+        await ws.send(json.dumps({'status':'ok','room_id':room_id}))
         print(f"[+] Room {room_id} created")
     elif action == 'join':
         if room_id not in ROOMS:
-            writer.write(json.dumps({'status':'error','error':'Room not found'}).encode() + b"\n")
-            await writer.drain()
-            writer.close()
+            await ws.send(json.dumps({'status':'error','error':'Room not found'}))
+            await ws.close()
             return
-        ROOMS[room_id].append(writer)
-        writer.write(json.dumps({'status':'ok','room_id':room_id}).encode() + b"\n")
-        await writer.drain()
+        ROOMS[room_id].add(ws)
+        await ws.send(json.dumps({'status':'ok','room_id':room_id}))
         print(f"[+] Peer joined room {room_id}")
     else:
-        writer.close()
+        await ws.close()
         return
 
-    # Relay messages/files between peers
     try:
-        while True:
-            line = await reader.readline()
-            if not line:
-                break
-            for w in list(ROOMS.get(room_id, [])):
-                if w is not writer:
-                    w.write(line)
-                    await w.drain()
+        async for message in ws:
+            # Broadcast JSON/text messages to other peers
+            for peer in list(ROOMS.get(room_id, [])):
+                if peer is not ws:
+                    await peer.send(message)
+    except websockets.ConnectionClosed:
+        pass
     finally:
-        participants = ROOMS.get(room_id, [])
-        if writer in participants:
-            participants.remove(writer)
-        writer.close()
-        await writer.wait_closed()
+        participants = ROOMS.get(room_id, set())
+        participants.discard(ws)
         if not participants:
             ROOMS.pop(room_id, None)
         print(f"[-] Peer left room {room_id}")
 
-async def start_server(port: int):
-    server = await asyncio.start_server(handle_client, host='0.0.0.0', port=port)
-    print(f"[*] Relay & health server listening on 0.0.0.0:{port}")
-    async with server:
-        await server.serve_forever()
+async def process_request(path, request_headers):
+    # HTTP health check before WebSocket handshake
+    if path in ('/', '/health'):
+        return (200, [('Content-Type', 'text/plain; charset=utf-8')], b'OK')
+    # None = continue with WebSocket handshake for /ws
+    return None
+
+async def main():
+    port = int(os.getenv('PORT', '12345'))
+    async with serve(handler, '0.0.0.0', port, process_request=process_request):
+        print(f"[*] WebSocket Relay & Health on 0.0.0.0:{port}")
+        await asyncio.Future()  # run forever
 
 if __name__ == '__main__':
-    # Use PORT env var if available (e.g. Render sets $PORT)
-    port = int(os.getenv('PORT', '12345'))
     try:
-        asyncio.run(start_server(port))
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\n[!] Server shutting down.")
