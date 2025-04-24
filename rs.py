@@ -1,83 +1,88 @@
 # relay_server.py
 #!/usr/bin/env python3
 """
-WebSocket-based P2P Relay & Health Server
+P2P Relay & Health Server using aiohttp WebSockets
 
-Usage:
+USAGE:
   # Run on Render or any HTTP-capable host (uses $PORT or defaults to 12345):
   python3 relay_server.py
 
 Clients connect via WebSocket to ws://<host>:<port>/ws
-Health check on HTTP GET / or /health returns 200 OK.
+Health check on HTTP GET or HEAD at / or /health returns 200 OK.
 """
-import asyncio
-import json
 import os
+import json
 import random
-from websockets import serve, WebSocketServerProtocol
-import websockets
+from aiohttp import web, WSMsgType
 
-# room_id -> set of WebSocketServerProtocol
+# room_id -> set of WebSocketResponse
 ROOMS = {}
 
-async def handler(ws: WebSocketServerProtocol, path: str):
-    # Initial JSON handshake
+async def websocket_handler(request):
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+
+    # Initial handshake: receive JSON action
+    msg = await ws.receive()
+    if msg.type != WSMsgType.TEXT:
+        await ws.close()
+        return ws
     try:
-        init = await ws.recv()
-        req = json.loads(init)
+        req = json.loads(msg.data)
         action = req.get('action')
         room_id = req.get('room_id')
     except Exception:
         await ws.close()
-        return
+        return ws
 
     if action == 'create':
         room_id = ''.join(random.choices('0123456789', k=6))
         ROOMS[room_id] = {ws}
-        await ws.send(json.dumps({'status':'ok','room_id':room_id}))
+        await ws.send_json({'status':'ok','room_id':room_id})
         print(f"[+] Room {room_id} created")
     elif action == 'join':
         if room_id not in ROOMS:
-            await ws.send(json.dumps({'status':'error','error':'Room not found'}))
+            await ws.send_json({'status':'error','error':'Room not found'})
             await ws.close()
-            return
+            return ws
         ROOMS[room_id].add(ws)
-        await ws.send(json.dumps({'status':'ok','room_id':room_id}))
+        await ws.send_json({'status':'ok','room_id':room_id})
         print(f"[+] Peer joined room {room_id}")
     else:
         await ws.close()
-        return
+        return ws
 
+    # Broadcast loop
     try:
-        async for message in ws:
-            # Broadcast JSON/text messages to other peers
-            for peer in list(ROOMS.get(room_id, [])):
-                if peer is not ws:
-                    await peer.send(message)
-    except websockets.ConnectionClosed:
-        pass
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT:
+                for peer in set(ROOMS.get(room_id, [])):
+                    if peer is not ws:
+                        await peer.send_str(msg.data)
+            elif msg.type == WSMsgType.ERROR:
+                break
     finally:
-        participants = ROOMS.get(room_id, set())
-        participants.discard(ws)
-        if not participants:
+        peers = ROOMS.get(room_id, set())
+        peers.discard(ws)
+        if not peers:
             ROOMS.pop(room_id, None)
         print(f"[-] Peer left room {room_id}")
 
-async def process_request(path, request_headers):
-    # HTTP health check before WebSocket handshake
-    if path in ('/', '/health'):
-        return (200, [('Content-Type', 'text/plain; charset=utf-8')], b'OK')
-    # None = continue with WebSocket handshake for /ws
-    return None
+    return ws
 
-async def main():
-    port = int(os.getenv('PORT', '12345'))
-    async with serve(handler, '0.0.0.0', port, process_request=process_request):
-        print(f"[*] WebSocket Relay & Health on 0.0.0.0:{port}")
-        await asyncio.Future()  # run forever
+async def health(request):
+    return web.Response(text='OK')
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n[!] Server shutting down.")
+    port = int(os.getenv('PORT', '12345'))
+    app = web.Application()
+    # Health endpoints
+    app.router.add_get('/', health)
+    app.router.add_head('/', health)
+    app.router.add_get('/health', health)
+    app.router.add_head('/health', health)
+    # WebSocket endpoint
+    app.router.add_get('/ws', websocket_handler)
+
+    print(f"[*] Running server on 0.0.0.0:{port}")
+    web.run_app(app, host='0.0.0.0', port=port)
