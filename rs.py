@@ -68,6 +68,12 @@ async def stream(room_id: str):
     q = asyncio.Queue()
     ROOMS[room_id]["clients"].append(q)
 
+    # Broadcast updated client count to all clients (including the new one)
+    client_count = len(ROOMS[room_id]["clients"])
+    client_count_msg = {"type": "client_count", "count": client_count}
+    for queue in list(ROOMS[room_id]["clients"]):
+        await queue.put(client_count_msg)
+
     async def event_generator():
         try:
             # Send message history
@@ -84,6 +90,11 @@ async def stream(room_id: str):
             pass
         finally:
             ROOMS[room_id]["clients"].remove(q)
+            # Broadcast updated client count after a client disconnects
+            client_count = len(ROOMS[room_id]["clients"])
+            client_count_msg = {"type": "client_count", "count": client_count}
+            for queue in list(ROOMS[room_id]["clients"]):
+                await queue.put(client_count_msg)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
