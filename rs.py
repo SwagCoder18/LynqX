@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 app = FastAPI()
 ROOMS = {}  # {room_id: {"clients": [queue], "messages": [message]}}
-CLEANUP_INTERVAL = 2  # seconds
+CLEANUP_INTERVAL = 5  # seconds
 MAX_HISTORY = 50  # Max messages to store per room
 
 class Message(BaseModel):
