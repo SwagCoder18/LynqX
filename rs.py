@@ -15,20 +15,22 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 app = FastAPI()
-ROOMS = {}
-CLEANUP_INTERVAL = 5  # seconds
+ROOMS = {}  # {room_id: {"clients": [queue], "messages": [message]}}
+CLEANUP_INTERVAL = 10  # seconds
+MAX_HISTORY = 50  # Max messages to store per room
 
 class Message(BaseModel):
     type: str
     data: str
     filename: str = None
     size: int = None
-    client_id: str = None  # Added client_id, optional for backward compatibility
+    client_id: str = None
+    nickname: str = None
 
 @app.post("/create")
 async def create_room():
     rid = uuid.uuid4().hex[:6]
-    ROOMS[rid] = []
+    ROOMS[rid] = {"clients": [], "messages": []}
     print(f"[Server] Created room: {rid}")
     return {"room_id": rid}
 
@@ -42,7 +44,20 @@ async def room_exists(room_id: str):
 async def send_message(room_id: str, message: Message):
     if room_id not in ROOMS:
         raise HTTPException(status_code=404, detail="Room not found")
-    for q in list(ROOMS[room_id]):
+    # Store message (except typing events)
+    if message.type != "typing":
+        ROOMS[room_id]["messages"].append(message.dict())
+        ROOMS[room_id]["messages"] = ROOMS[room_id]["messages"][-MAX_HISTORY:]  # Keep last 50
+    for q in list(ROOMS[room_id]["clients"]):
+        await q.put(message.dict())
+    return {"status": "ok"}
+
+@app.post("/rooms/{room_id}/typing")
+async def send_typing(room_id: str, message: Message):
+    if room_id not in ROOMS:
+        raise HTTPException(status_code=404, detail="Room not found")
+    message.type = "typing"
+    for q in list(ROOMS[room_id]["clients"]):
         await q.put(message.dict())
     return {"status": "ok"}
 
@@ -51,10 +66,16 @@ async def stream(room_id: str):
     if room_id not in ROOMS:
         raise HTTPException(status_code=404, detail="Room not found")
     q = asyncio.Queue()
-    ROOMS[room_id].append(q)
+    ROOMS[room_id]["clients"].append(q)
 
     async def event_generator():
         try:
+            # Send message history
+            for msg in ROOMS[room_id]["messages"]:
+                payload = json.dumps(msg)
+                yield f"data: {payload}\n\n"
+                await asyncio.sleep(0.01)  # Prevent overwhelming client
+            # Stream new messages
             while True:
                 msg = await q.get()
                 payload = json.dumps(msg)
@@ -62,7 +83,7 @@ async def stream(room_id: str):
         except asyncio.CancelledError:
             pass
         finally:
-            ROOMS[room_id].remove(q)
+            ROOMS[room_id]["clients"].remove(q)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -74,7 +95,7 @@ async def health():
 async def cleanup_rooms():
     while True:
         await asyncio.sleep(CLEANUP_INTERVAL)
-        to_delete = [room for room, clients in ROOMS.items() if not clients]
+        to_delete = [room for room, data in ROOMS.items() if not data["clients"]]
         for room in to_delete:
             print(f"[Cleanup] Removing empty room: {room}")
             del ROOMS[room]
