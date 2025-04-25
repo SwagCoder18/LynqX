@@ -1,11 +1,10 @@
-# relay_server.py
 #!/usr/bin/env python3
 """
 P2P Chat Relay using HTTP REST + Server-Sent Events (SSE)
 
 USAGE:
   pip install fastapi uvicorn
-  uvicorn relay_server:app --host 0.0.0.0 --port 8000
+  uvicorn rs:app --host 0.0.0.0 --port 8000
 """
 import os
 import uuid
@@ -17,13 +16,14 @@ from pydantic import BaseModel
 
 app = FastAPI()
 ROOMS = {}
-CLEANUP_INTERVAL = 10  # seconds
+CLEANUP_INTERVAL = 5  # seconds
 
 class Message(BaseModel):
     type: str
     data: str
     filename: str = None
     size: int = None
+    client_id: str = None  # Added client_id, optional for backward compatibility
 
 @app.post("/create")
 async def create_room():
