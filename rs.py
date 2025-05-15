@@ -80,7 +80,7 @@ async def send_typing(room_id: str, message: Message):
     return {"status": "ok"}
 
 @app.get("/rooms/{room_id}/stream")
-async def stream(room_id: str):
+async def stream(room_id: str, client_id: str):
     if room_id not in ROOMS:
         raise HTTPException(status_code=404, detail="Room not found")
     q = asyncio.Queue()
@@ -102,6 +102,9 @@ async def stream(room_id: str):
             # Stream new messages
             while True:
                 msg = await q.get()
+                # skip echoing back to the sender
+                if msg.get("client_id") == client_id:
+                    continue
                 payload = json.dumps(msg)
                 yield f"data: {payload}\n\n"
         except asyncio.CancelledError:
