@@ -11,17 +11,31 @@ import uuid
 import json
 import asyncio
 import base64
-from fastapi import FastAPI, HTTPException, Request, Header
-from fastapi import WebSocket, WebSocketDisconnect, Depends
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import FastAPI, HTTPException, Request, Header, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
+from datetime import datetime, timedelta
+import jwt  # PyJWT
+
+# --- JWT config
+SECRET_KEY = "n4X_b_Bpj0nEolIANE9U9QYrfaYFngIEh-8NKO4XOIBtwdLHu8cDyHVH4NNMWiI9bUVfTq3l4TBYqX_O7Q3biQ"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    # TODO: validate your JWT / OAuth2 token here
-    return token
+def authenticate_user(username: str, password: str) -> bool:
+    # TODO: replace with real lookup + hashing
+    return username == "alice" and password == "s3cr3t"
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
 
 ROOMS: dict[str, dict] = {}  # existing in‐memory structure
 app = FastAPI()
@@ -37,6 +51,32 @@ class Message(BaseModel):
     client_id: str = None
     nickname: str = None
     current_size: int = None  # Added for file-chunk progress
+
+@app.post("/token")
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    if not authenticate_user(form_data.username, form_data.password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+        )
+    access_token = create_access_token(
+        {"sub": form_data.username},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise jwt.PyJWTError()
+    except jwt.PyJWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+        )
+    return username
 
 @app.post("/create")
 async def create_room():
@@ -177,20 +217,16 @@ async def websocket_endpoint(
     room_id: str,
     token: str = Depends(get_current_user)
 ):
-    # 1) Accept and register
     await websocket.accept()
     room = ROOMS.setdefault(room_id, {"clients": [], "messages": [], "file_progress": {}})
     room["clients"].append(websocket)
-
     try:
         # 2) Notify everyone: file start
         await broadcast(room_id, {"event": "file-start"}, data=b"")
-
         # 3) Stream raw binary frames immediately
         async for chunk in websocket.iter_bytes():
             # chunk is bytes
             await broadcast(room_id, {"event": "file-chunk"}, data=chunk)
-
         # 4) When client cleanly closes → end‐of‐file
         await broadcast(room_id, {"event": "file-end"}, data=b"")
     except WebSocketDisconnect:
