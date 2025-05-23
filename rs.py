@@ -12,11 +12,20 @@ import json
 import asyncio
 import base64
 from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi import WebSocket, WebSocketDisconnect, Depends
+from fastapi.security import OAuth2PasswordBearer
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    # TODO: validate your JWT / OAuth2 token here
+    return token
+
+ROOMS: dict[str, dict] = {}  # existing in‐memory structure
 app = FastAPI()
-ROOMS = {}  # {room_id: {"clients": [queue], "messages": [message], "file_progress": {filename: {"current_size": int, "sender_id": str}}}}
+
 CLEANUP_INTERVAL = 5  # seconds
 MAX_HISTORY = 50  # Max messages to store per room
 
@@ -159,3 +168,44 @@ async def cleanup_rooms():
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(cleanup_rooms())
+
+# ----------------------------------------------------------------
+# WebSocket endpoint for streaming raw file bytes
+@app.websocket("/ws/{room_id}")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    room_id: str,
+    token: str = Depends(get_current_user)
+):
+    # 1) Accept and register
+    await websocket.accept()
+    room = ROOMS.setdefault(room_id, {"clients": [], "messages": [], "file_progress": {}})
+    room["clients"].append(websocket)
+
+    try:
+        # 2) Notify everyone: file start
+        await broadcast(room_id, {"event": "file-start"}, data=b"")
+
+        # 3) Stream raw binary frames immediately
+        async for chunk in websocket.iter_bytes():
+            # chunk is bytes
+            await broadcast(room_id, {"event": "file-chunk"}, data=chunk)
+
+        # 4) When client cleanly closes → end‐of‐file
+        await broadcast(room_id, {"event": "file-end"}, data=b"")
+    except WebSocketDisconnect:
+        room["clients"].remove(websocket)
+
+
+async def broadcast(room_id: str, meta: dict, data: bytes):
+    """
+    Send a JSON envelope to all WebSocket clients in room_id.
+    We transport `data` as Latin-1–encoded so it survives JSON.
+    """
+    text = data.decode("latin1") if data else ""
+    payload = {"meta": meta, "data": text}
+    for ws in list(ROOMS[room_id]["clients"]):
+        try:
+            await ws.send_json(payload)
+        except:
+            ROOMS[room_id]["clients"].remove(ws)
