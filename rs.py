@@ -11,8 +11,8 @@ import uuid
 import json
 import asyncio
 import base64
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
 app = FastAPI()
@@ -128,6 +128,20 @@ async def get_file_progress(room_id: str, client_id: str):
         if progress["sender_id"] == client_id:
             ongoing_transfers[filename] = progress["current_size"]
     return {"ongoing_transfers": ongoing_transfers}
+
+@app.post("/upload")
+async def upload_file(request: Request, x_filename: str = Header(...)):
+    os.makedirs("uploads", exist_ok=True)
+    file_path = os.path.join("uploads", x_filename)
+
+    try:
+        with open(file_path, "wb") as out_file:
+            async for chunk in request.stream():
+                out_file.write(chunk)
+        print(f"[Server] Uploaded file: {x_filename}")
+        return JSONResponse({"status": "ok", "filename": x_filename})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/health")
 async def health():
